@@ -1,0 +1,55 @@
+# Abre o Mutto numa máquina Windows limpa (a primeira abertura de quem acabou de baixar) e
+# junta o que o app e o Windows registraram. Só roda nesta branch, por push.
+name: teste-limpo
+on:
+  push:
+    branches: [teste-limpo]
+jobs:
+  abrir:
+    runs-on: windows-2025
+    steps:
+      - name: Baixar e instalar
+        shell: pwsh
+        run: |
+          $v = "0.9.3"
+          Invoke-WebRequest "https://github.com/rafa-coelho/mutto-releases/releases/download/v$v/Mutto-$v-x64-setup.exe" -OutFile setup.exe
+          # Dumps do Windows para qualquer queda do Mutto.
+          New-Item -Force "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\Mutto.exe" | Out-Null
+          Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\Mutto.exe" DumpFolder "$env:RUNNER_TEMP\dumps"
+          Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\Mutto.exe" DumpType 1
+          $p = Start-Process .\setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-","/LOG=$env:RUNNER_TEMP\setup.log" -Wait -PassThru
+          "setup saiu com $($p.ExitCode)"
+          Get-ChildItem "$env:LOCALAPPDATA\Programs\Mutto" | Select-Object -First 5 | Format-Table Name, Length
+          [System.Environment]::OSVersion.Version
+      - name: Abrir o Mutto
+        shell: pwsh
+        run: |
+          $exe = "$env:LOCALAPPDATA\Programs\Mutto\Mutto.exe"
+          $p = Start-Process $exe -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\stdout.txt" -RedirectStandardError "$env:RUNNER_TEMP\stderr.txt"
+          Start-Sleep 20
+          $p.Refresh()
+          if ($p.HasExited) { "MUTTO SAIU: código $($p.ExitCode) (0x{0:X8})" -f $p.ExitCode } else { "Mutto continua aberto depois de 20 s" }
+          Get-Process Mutto -ErrorAction SilentlyContinue | Format-Table Id, StartTime, WorkingSet64
+      - name: O que ficou registrado
+        if: always()
+        shell: pwsh
+        run: |
+          "--- stdout"; Get-Content "$env:RUNNER_TEMP\stdout.txt" -ErrorAction SilentlyContinue
+          "--- stderr"; Get-Content "$env:RUNNER_TEMP\stderr.txt" -ErrorAction SilentlyContinue
+          "--- erros.log do Mutto"; Get-Content "$env:LOCALAPPDATA\Mutto\erros.log" -ErrorAction SilentlyContinue
+          "--- pasta de dados"; Get-ChildItem "$env:LOCALAPPDATA\Mutto" -ErrorAction SilentlyContinue | Format-Table Name, Length
+          "--- log de eventos (Application, últimos 15 min)"
+          Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = (Get-Date).AddMinutes(-15) } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match "Mutto|WindowsAppRuntime|Microsoft.UI|\.NET|Application Error" } |
+            Select-Object -First 10 | ForEach-Object { "[$($_.TimeCreated)] $($_.ProviderName) $($_.Id)`n$($_.Message)`n" }
+          "--- dumps"; Get-ChildItem "$env:RUNNER_TEMP\dumps" -ErrorAction SilentlyContinue | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: teste-limpo
+          path: |
+            ${{ runner.temp }}/dumps
+            ${{ runner.temp }}/setup.log
+            ${{ runner.temp }}/stdout.txt
+            ${{ runner.temp }}/stderr.txt
+          if-no-files-found: ignore
